@@ -62,7 +62,6 @@ canvas{display:block}
 #telemetry .resRow{font-size:10px}
 #telemetry .resRow b{color:var(--amber-hi)}
 #telemetry .eyebrow{font-size:9px;text-align:right}
-
 #score{font-family:'Orbitron',sans-serif;font-weight:900;font-size:19px;color:var(--amber);letter-spacing:.08em}
 #bossWrap{bottom:64px;left:50%;transform:translateX(-50%);width:min(560px,80vw);padding:8px 14px 12px;display:none;text-align:center}
 #bossName{font-family:'Orbitron',sans-serif;font-weight:700;font-size:12px;letter-spacing:.4em;color:var(--red)}
@@ -86,7 +85,6 @@ canvas{display:block}
   text-shadow:0 0 14px rgba(255,122,26,.35),0 0 60px rgba(255,122,26,.25)}
 .bigTitle span{color:var(--amber)}
 .tagline{font-family:'Space Mono',monospace;font-size:clamp(10px,1.6vw,13px);letter-spacing:.34em;color:var(--ice);margin-top:14px;max-width:640px}
-
 .btn{pointer-events:auto;cursor:pointer;margin-top:14px;font-family:'Orbitron',sans-serif;font-weight:700;font-size:15px;letter-spacing:.3em;color:var(--void);background:linear-gradient(90deg,var(--amber),var(--amber-hi));border:none;padding:15px 52px;clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px);transition:filter .15s,transform .1s}
 .btn:hover{filter:brightness(1.18)}
 .btn:active{transform:scale(.97)}
@@ -505,23 +503,25 @@ function onResize() {
 addEventListener('resize', onResize);
 
 /* lighting */
-scene.add(new THREE.HemisphereLight(0x5a7ba6, 0x0a1020, 0.75));
+const hemi = new THREE.HemisphereLight(0x5a7ba6, 0x0a1020, 0.75);
+scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xbfe0ff, 1.5);
 sun.position.set(-40, 60, 40);
 scene.add(sun);
 const rim = new THREE.DirectionalLight(0xb26bff, 0.5);
 rim.position.set(30, 10, -30);
 scene.add(rim);
+const FOG_BASE = 0x060a14;
 
 /* ============================================================
    SKY — procedural nebula / stars / aurora / planet shader
    ============================================================ */
 const skyMat = new THREE.ShaderMaterial({
   depthWrite:false, fog:false, transparent:true,
-  uniforms: { uTime:{value:0}, uAlpha:{value:0.58} },
+  uniforms: { uTime:{value:0}, uAlpha:{value:0.58}, uThemeTint:{value:new THREE.Color(0x1a0a29)} },
   vertexShader: `varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }`,
   fragmentShader: `
-    uniform float uTime,uAlpha; varying vec2 vUv;
+    uniform float uTime,uAlpha; uniform vec3 uThemeTint; varying vec2 vUv;
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1,311.7)))*43758.5453123); }
     float noise(vec2 p){
       vec2 i=floor(p), f=fract(p); f=f*f*(3.0-2.0*f);
@@ -537,6 +537,9 @@ const skyMat = new THREE.ShaderMaterial({
       col += vec3(0.10,0.03,0.16) * smoothstep(0.45,0.85,n) * 1.4;          // violet gas
       col += vec3(0.02,0.10,0.10) * smoothstep(0.55,0.9,n2) * 1.1;          // cyan gas
       col += vec3(0.14,0.06,0.01) * smoothstep(0.68,0.95,fbm(uv*3.0+9.0));  // amber ember
+      // level-matched hue wash — ties the procedural nebula to the current
+      // sector's colored lighting so sky, gas and rim-lit character read as one scene
+      col += uThemeTint * smoothstep(0.2,0.85, fbm(uv*2.2 - vec2(uTime*0.006,0.0))) * 0.9;
       // stars (two layers)
       vec2 sp = uv*vec2(220.0,110.0);
       float s = step(0.9975, hash(floor(sp))) * (0.5+0.5*sin(uTime*3.0+hash(floor(sp))*40.0));
@@ -571,13 +574,8 @@ const texLoader = new THREE.TextureLoader();
 const bgTexCache = {};
 function getBgTexture(key) {
   if (bgTexCache[key]) return bgTexCache[key];
-  let t = null;
-  try {
-    t = texLoader.load(ASSETS.bg[key]);
-    t.colorSpace = THREE.SRGBColorSpace;
-  } catch (e) {
-    console.warn('Background texture failed to load', e);
-  }
+  const t = texLoader.load(ASSETS.bg[key]);
+  t.colorSpace = THREE.SRGBColorSpace;
   bgTexCache[key] = t;
   return t;
 }
@@ -593,7 +591,50 @@ function makeBgPlane(z) {
 const bgPlaneA = makeBgPlane(-170);
 const bgPlaneB = makeBgPlane(-171);
 let bgFront = bgPlaneA, bgBack = bgPlaneB, bgFade = 0, bgFading = false;
+
+/* ============================================================
+   LEVEL THEMES — per-sector colored-light palette. Rim/hemi/sun
+   lights, fog, the sky nebula tint, drifting gas clouds and the
+   atmospheric light shafts all lerp toward these so every visual
+   layer (and the character's rim-lit "reflection") reads as one
+   consistent colored hue that matches that sector's background art.
+   (gasClouds / lightShafts / player are only *read* inside
+   updateLevelTheme, which runs later in the frame loop, so it's
+   safe for this block to sit above where those are declared.)
+   ============================================================ */
+const LEVEL_THEME = {
+  title:      { rim:0x4fd1c5, rimI:0.5,  hemiSky:0x5a7ba6, hemiGround:0x0a1020, sun:0xbfe0ff, fog:0x060a14, tint:0x1a1229, gas:[0x2a6b74,0x4a2a74,0x1e4a5a] },
+  insertion:  { rim:0xffb35c, rimI:0.85, hemiSky:0xffae66, hemiGround:0x1a0e08, sun:0xffdca0, fog:0x1a0f08, tint:0x331a08, gas:[0xffb35c,0x6a3a1a,0xff7a1a] },
+  landing:    { rim:0x4fd1c5, rimI:0.5,  hemiSky:0x5a7ba6, hemiGround:0x0a1020, sun:0xbfe0ff, fog:0x060a14, tint:0x0e1a29, gas:[0x2a6b74,0x1e4a5a,0x2f5f8a] },
+  defense:    { rim:0xff7a1a, rimI:0.7,  hemiSky:0xff9a5a, hemiGround:0x1c0a08, sun:0xffcfa0, fog:0x140a08, tint:0x2a1206, gas:[0x6a3a1a,0x8a2a1a,0x4a2a74] },
+  industrial: { rim:0xffb35c, rimI:0.6,  hemiSky:0xd6a35a, hemiGround:0x120c08, sun:0xffdca0, fog:0x120e08, tint:0x241708, gas:[0x6a4a1a,0x8a5a1a,0x2a6b74] },
+  nullcore:   { rim:0xb26bff, rimI:0.8,  hemiSky:0x6a3ea6, hemiGround:0x0a0614, sun:0xd6a0ff, fog:0x0a0614, tint:0x220f33, gas:[0x4a2a74,0x6a1a3a,0x2a1a74] },
+  boss:       { rim:0xff2d3a, rimI:0.95, hemiSky:0xff5a5a, hemiGround:0x140406, sun:0xffb0b0, fog:0x0e0304, tint:0x330810, gas:[0x8a1a1a,0x4a2a74,0x6a1a3a] },
+  victory:    { rim:0xffe08a, rimI:0.85, hemiSky:0x9fd8ff, hemiGround:0x101a24, sun:0xfff0c0, fog:0x0a1420, tint:0x14291f, gas:[0x2a6b74,0xffb35c,0x4fd1c5] }
+};
+let themeKey = 'title';
+function setLevelTheme(key) { if (LEVEL_THEME[key]) themeKey = key; }
+const _tc = new THREE.Color();
+function updateLevelTheme(dt) {
+  const th = LEVEL_THEME[themeKey] || LEVEL_THEME.title;
+  const k = 1 - Math.pow(0.0025, dt); // smooth exponential approach, frame-rate independent
+  rim.color.lerp(_tc.set(th.rim), k);
+  rim.intensity += (th.rimI - rim.intensity) * k;
+  sun.color.lerp(_tc.set(th.sun), k);
+  hemi.color.lerp(_tc.set(th.hemiSky), k);
+  hemi.groundColor.lerp(_tc.set(th.hemiGround), k);
+  skyMat.uniforms.uThemeTint.value.lerp(_tc.set(th.tint), k);
+  if (scene.fog) scene.fog.color.lerp(_tc.set(th.fog), k);
+  if (typeof player !== 'undefined' && player.envRim) {
+    player.envRim.color.lerp(_tc.set(th.rim), k);
+    player.envRim.intensity += (0.9 - player.envRim.intensity) * k;
+  }
+  if (typeof gasClouds !== 'undefined') for (const c of gasClouds) c.s.material.color.lerp(_tc.set(th.gas[c.gasIdx % th.gas.length]), k * 0.6);
+  if (typeof lightShafts !== 'undefined') for (const l of lightShafts) l.s.material.color.lerp(_tc.set(th.gas[l.gasIdx % th.gas.length]), k * 0.6);
+}
+
 function setBackdrop(key) {
+  setLevelTheme(key);
   if (bgFront.userData.key === key) return;
   bgBack.material.map = getBgTexture(key);
   bgBack.userData.key = key;
@@ -889,15 +930,17 @@ function updateMuzzleFlashes(dt) {
 }
 
 /* ============================================================
-   DRIFTING GAS / NEBULA ATMOSPHERE
+   DRIFTING GAS / NEBULA ATMOSPHERE — ambient volumetric-style
+   sprite clouds that drift through the play space (space telemetry
+   readouts on the HUD track their density — see updateHUD)
    ============================================================ */
 const gasClouds = [];
-const GAS_COLORS = [0x2a6b74, 0x4a2a74, 0x6a4a1a, 0x1e4a5a];
 {
-  const N = 26;
+  const N = 34;
   for (let i = 0; i < N; i++) {
+    const gasIdx = i % LEVEL_THEME.title.gas.length;
     const s = new THREE.Sprite(new THREE.SpriteMaterial({
-      map: glowTex, color: GAS_COLORS[i % GAS_COLORS.length],
+      map: glowTex, color: LEVEL_THEME.title.gas[gasIdx],
       transparent:true, opacity: 0.05 + Math.random() * 0.09,
       depthWrite:false, blending:THREE.AdditiveBlending, fog:true
     }));
@@ -905,15 +948,39 @@ const GAS_COLORS = [0x2a6b74, 0x4a2a74, 0x6a4a1a, 0x1e4a5a];
     s.scale.setScalar(scale);
     s.position.set(Math.random() * 560 - 30, -2 + Math.random() * 26, -8 - Math.random() * 30);
     scene.add(s);
-    gasClouds.push({ s, baseY: s.position.y, spd: 0.15 + Math.random() * 0.35, seed: Math.random() * 100 });
+    gasClouds.push({ s, gasIdx, baseY: s.position.y, baseOpacity: s.material.opacity, spd: 0.15 + Math.random() * 0.35, seed: Math.random() * 100 });
+  }
+}
+/* soft vertical light shafts drifting through the gas — sells the sense of
+   volumetric atmosphere/god-rays without a real volumetric renderer */
+const lightShafts = [];
+{
+  const N = 9;
+  for (let i = 0; i < N; i++) {
+    const gasIdx = i % LEVEL_THEME.title.gas.length;
+    const s = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: glowTex, color: LEVEL_THEME.title.gas[gasIdx],
+      transparent:true, opacity: 0.035 + Math.random() * 0.03,
+      depthWrite:false, blending:THREE.AdditiveBlending, fog:true
+    }));
+    s.scale.set(4 + Math.random() * 3, 34 + Math.random() * 20, 1);
+    s.position.set(Math.random() * 560 - 30, 8 + Math.random() * 10, -18 - Math.random() * 24);
+    scene.add(s);
+    lightShafts.push({ s, gasIdx, baseX: s.position.x, spd: 0.05 + Math.random() * 0.1, seed: Math.random() * 100 });
   }
 }
 function updateGasClouds(dt) {
   for (const c of gasClouds) {
     c.s.position.x += dt * c.spd;
     c.s.position.y = c.baseY + Math.sin(G.time * 0.15 + c.seed) * 1.4;
+    c.s.material.opacity = c.baseOpacity * (0.75 + 0.25 * Math.sin(G.time * 0.3 + c.seed));
     const dx = c.s.position.x - camera.position.x;
     if (dx > 300) c.s.position.x -= 580; else if (dx < -300) c.s.position.x += 580;
+  }
+  for (const l of lightShafts) {
+    l.s.position.x = l.baseX + Math.sin(G.time * l.spd + l.seed) * 6;
+    const dx = l.s.position.x - camera.position.x;
+    if (dx > 300) { l.baseX -= 580; l.s.position.x -= 580; } else if (dx < -300) { l.baseX += 580; l.s.position.x += 580; }
   }
 }
 
@@ -986,8 +1053,7 @@ const WEAPONS = [
   { name:'ION SHOTGUN',   glyph:'S', mode:'SCATTER // 7-CELL',rate:0.85,  heat:0.28,  color:COL.violet,flash:0.9 }
 ];
 const player = {
-  // Hitbox parameters adjusted to perfectly match realistic visual height
-  x: 2, y: 2, vx: 0, vy: 0, w: 0.6, h: 1.8,
+  x: 2, y: 2, vx: 0, vy: 0, w: 0.62, h: 1.55,
   facing: 1, grounded: false, jumps: 2,
   hull: 100, shield: 100, regenT: 0,
   weapon: 0, cooldown: 0, heat: 0, overheat: false,
@@ -1006,20 +1072,12 @@ function buildPlayer() {
   scene.add(g);
   player.group = g;
 
-  /* lightweight placeholder while the GLB streams in (or fails) */
-  const placeholder = new THREE.Group();
-  const body = new THREE.Mesh(
+  /* lightweight placeholder while the GLB streams in */
+  const placeholder = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.32, 0.9, 4, 8),
     new THREE.MeshStandardMaterial({ color: 0x27303f, metalness:0.7, roughness:0.4, emissive: COL.cyan, emissiveIntensity:0.15 })
   );
-  body.position.y = 0.95;
-  placeholder.add(body);
-  
-  const fallbackVisor = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), new THREE.MeshBasicMaterial({ color: COL.cyan }));
-  fallbackVisor.position.set(0.2, 1.4, 0);
-  placeholder.add(fallbackVisor);
-  player.visor = fallbackVisor;
-
+  placeholder.position.y = 0.95;
   g.add(placeholder);
   player.placeholder = placeholder;
 
@@ -1027,89 +1085,101 @@ function buildPlayer() {
   thrust.position.set(-0.1, 0.15, 0); g.add(thrust);
   player.thrust = thrust;
 
-  /* fallback gun-tip anchor */
+  /* soft colored rim/fresnel light — always matches the current sector's
+     LEVEL_THEME (see updateLevelTheme) so the character visibly "catches"
+     the ambient hue of whatever backdrop/gas/nebula it's standing in,
+     instead of looking flatly lit and disconnected from the environment */
+  const envRim = new THREE.PointLight(COL.cyan, 0.6, 5.5, 2);
+  envRim.position.set(-0.35, 1.15, -0.5);
+  g.add(envRim);
+  player.envRim = envRim;
+
+  /* fallback gun-tip anchor (used before/if the bone attach fails) */
   const anchor = new THREE.Object3D();
   anchor.position.set(0.5, 1.0, 0.16);
   g.add(anchor);
   player.gunAnchor = anchor;
-  
-  const fallbackGunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), new THREE.MeshBasicMaterial({ color: COL.cyan }));
-  fallbackGunTip.rotation.z = Math.PI / 2;
-  anchor.add(fallbackGunTip);
-  player.gunTip = fallbackGunTip;
 
-  const fallbackMuzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
-  fallbackMuzzleLight.position.set(0.2, 0, 0);
-  anchor.add(fallbackMuzzleLight);
-  player.muzzleLight = fallbackMuzzleLight;
+  new GLTFLoader().load(ASSETS.charModel, (gltf) => {
+    const root = gltf.scene;
+    root.traverse(o => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; if (o.material) { o.material.metalness = Math.min(1, (o.material.metalness ?? 0.5) + 0.15); o.material.roughness = Math.max(0.15, (o.material.roughness ?? 0.6) - 0.1); } } });
 
-  try {
-    new GLTFLoader().load(ASSETS.charModel, (gltf) => {
-      const root = gltf.scene;
-      root.traverse(o => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; if (o.material) { o.material.metalness = Math.min(1, (o.material.metalness ?? 0.5) + 0.15); o.material.roughness = Math.max(0.15, (o.material.roughness ?? 0.6) - 0.1); } } });
+    /* Force a full local/world matrix refresh before measuring. Mixamo ->
+       DCC -> glTF export pipelines can leave the armature/root with stale
+       or not-yet-applied transforms at the instant the loader's onLoad
+       fires; measuring before this update is the classic cause of the
+       auto-scale math coming out wrong and the rig rendering enormous
+       (or, less often, invisible-tiny) in the world. */
+    root.updateMatrixWorld(true);
 
-      const box = new THREE.Box3().setFromObject(root);
-      const rawH = Math.max(0.001, box.max.y - box.min.y);
-      const scale = CHAR_HEIGHT / rawH;
+    let box = new THREE.Box3().setFromObject(root, true);
+    let rawH = box.max.y - box.min.y;
+    if (!isFinite(rawH) || rawH < 0.05) {
+      console.warn('[ELITE-9] elite-9.glb bounding box looked degenerate (height=' + rawH + '); using a 1:1 fallback scale.');
+      rawH = CHAR_HEIGHT;
+    }
+    let scale = CHAR_HEIGHT / rawH;
+    // Sanity clamp — catches models baked in centimeters (~100x too big),
+    // a stray 0.01 armature scale, or any other unit mismatch, so a bad
+    // export degrades gracefully instead of filling the whole screen.
+    scale = THREE.MathUtils.clamp(scale, 0.02, 8);
 
-      const model = new THREE.Group();
-      model.scale.setScalar(scale);
-      model.rotation.y = CHAR_BASE_YAW;
-      root.position.y -= box.min.y;
-      model.add(root);
-      g.add(model);
-      player.model = model;
-      g.remove(placeholder);
-      g.remove(anchor);
+    const model = new THREE.Group();
+    model.scale.setScalar(scale);
+    model.rotation.y = CHAR_BASE_YAW;
+    root.position.y -= box.min.y; // ground the feet at model-local y=0
+    model.add(root);
+    g.add(model);
+    player.model = model;
+    g.remove(placeholder);
+    if (window.console && console.debug) {
+      console.debug('[ELITE-9] elite-9.glb loaded — raw height ' + rawH.toFixed(3) + 'u, applied scale ' + scale.toFixed(4) + ' → ' + CHAR_HEIGHT + 'u target.');
+    }
 
-      /* animation mixer */
-      const mixer = new THREE.AnimationMixer(root);
-      player.mixer = mixer;
-      const find = n => THREE.AnimationClip.findByName(gltf.animations, n) || gltf.animations.find(c => c.name.toLowerCase().includes(n.toLowerCase()));
-      const clipIdle = find('idle');
-      const clipWalk = find('sneak walk');
-      const clipKickA = find('hurricane kick');
-      const clipKickB = find('inside cresent kick') || find('inside crescent kick');
-      if (clipIdle) player.actions.idle = mixer.clipAction(clipIdle);
-      if (clipWalk) player.actions.walk = mixer.clipAction(clipWalk);
-      if (clipKickA) player.actions.kickA = mixer.clipAction(clipKickA);
-      if (clipKickB) player.actions.kickB = mixer.clipAction(clipKickB);
-      if (player.actions.idle) { player.actions.idle.play(); player.activeAction = player.actions.idle; }
+    /* animation mixer */
+    const mixer = new THREE.AnimationMixer(root);
+    player.mixer = mixer;
+    const find = n => THREE.AnimationClip.findByName(gltf.animations, n) || gltf.animations.find(c => c.name.toLowerCase().includes(n.toLowerCase()));
+    const clipIdle = find('idle');
+    const clipWalk = find('sneak walk');
+    const clipKickA = find('hurricane kick');
+    const clipKickB = find('inside cresent kick') || find('inside crescent kick');
+    if (clipIdle) player.actions.idle = mixer.clipAction(clipIdle);
+    if (clipWalk) player.actions.walk = mixer.clipAction(clipWalk);
+    if (clipKickA) player.actions.kickA = mixer.clipAction(clipKickA);
+    if (clipKickB) player.actions.kickB = mixer.clipAction(clipKickB);
+    if (player.actions.idle) { player.actions.idle.play(); player.activeAction = player.actions.idle; }
 
-      /* find hand + head bones to attach weapon glow / targeting eye */
-      let rightHand = null, head = null;
-      root.traverse(o => {
-        if (o.name === 'mixamorig:RightHand') rightHand = o;
-        if (o.name === 'mixamorig:Head') head = o;
-      });
-      const glowC = new THREE.MeshBasicMaterial({ color: COL.cyan });
-      if (rightHand) {
-        const gunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), glowC);
-        gunTip.rotation.z = Math.PI / 2;
-        gunTip.position.set(0.16, -0.02, 0.02);
-        rightHand.add(gunTip);
-        player.gunTip = gunTip;
-        const muzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
-        muzzleLight.position.set(0.3, -0.02, 0.02);
-        rightHand.add(muzzleLight);
-        player.muzzleLight = muzzleLight;
-      }
-      if (head) {
-        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), glowC);
-        eye.position.set(0.09, 0.02, 0.11);
-        head.add(eye);
-        player.visor = eye;
-      }
-      player.ready = true;
-      setWeapon(player.weapon); // Ensure color updates on load
-    }, undefined, (err) => {
-      console.warn('ELITE-9: character model failed to load, using placeholder', err);
+    /* find hand + head bones to attach weapon glow / targeting eye */
+    let rightHand = null, head = null;
+    root.traverse(o => {
+      if (o.name === 'mixamorig:RightHand') rightHand = o;
+      if (o.name === 'mixamorig:Head') head = o;
     });
-  } catch (err) {
-    console.warn('ELITE-9: Invalid URL for GLB (expected in sandboxed environment), using placeholder.', err);
+    const glowC = new THREE.MeshBasicMaterial({ color: COL.cyan });
+    if (rightHand) {
+      const gunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), glowC);
+      gunTip.rotation.z = Math.PI / 2;
+      gunTip.position.set(0.16, -0.02, 0.02);
+      rightHand.add(gunTip);
+      player.gunTip = gunTip;
+      const muzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
+      muzzleLight.position.set(0.3, -0.02, 0.02);
+      rightHand.add(muzzleLight);
+      player.muzzleLight = muzzleLight;
+    }
+    if (head) {
+      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), glowC);
+      eye.position.set(0.09, 0.02, 0.11);
+      head.add(eye);
+      player.visor = eye;
+    }
     player.ready = true;
-  }
+  }, undefined, (err) => {
+    console.warn('ELITE-9: character model failed to load, using placeholder', err);
+  });
 }
+buildPlayer();
 
 function setWeapon(i) {
   player.weapon = i;
@@ -1166,7 +1236,7 @@ function tryFire(dt) {
   if (player.heat >= 1) { player.overheat = true; comms('WEAPON OVERHEAT — VENTING'); }
   const dir = player.facing;
   const upAim = Input.up && !player.grounded ? 0.35 : (Input.up ? 0.55 : 0);
-  const gx = player.x + dir * 0.9, gy = player.y + 1.1; // gun y adjusted to 1.8 height
+  const gx = player.x + dir * 0.9, gy = player.y + 1.0;
   AudioSys.shoot(player.weapon);
   Particles.spawn(gx, gy, 0, 4, w.color, 3, 0, 0.15);
   muzzleFlash(gx, gy, w.color, w.flash);
@@ -1207,7 +1277,7 @@ function damagePlayer(amount, fromX) {
 function killPlayer() {
   if (!player.alive) return;
   player.alive = false;
-  explode(player.x, player.y + 0.9, true, COL.cyan); // center y adjusted to 1.8 height
+  explode(player.x, player.y + 0.8, true, COL.cyan);
   player.group.visible = false;
   setTimeout(() => { G.mode = 'dead'; $('death').classList.add('on'); $('hud').classList.remove('on'); }, 900);
 }
@@ -1222,7 +1292,7 @@ function updatePlayer(dt) {
     player.dashT = 0.24; player.dashCD = 1.1; player.inv = Math.max(player.inv, 0.3);
     player.dashKick = Math.random() < 0.5 ? 'kickA' : 'kickB';
     AudioSys.dash();
-    shockwave(player.x, player.y + 0.9, COL.cyan, 2.5); // center y adjusted to 1.8 height
+    shockwave(player.x, player.y + 0.8, COL.cyan, 2.5);
   }
   let move = (Input.right ? 1 : 0) - (Input.left ? 1 : 0) + joyVec;
   move = Math.max(-1, Math.min(1, move));
@@ -1400,7 +1470,7 @@ function updateEnemies(dt) {
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     e.t += dt;
-    const dx = player.x - e.x, dy = (player.y + 0.9) - e.y; // center y adjusted to 1.8 height
+    const dx = player.x - e.x, dy = (player.y + 0.8) - e.y;
     const dist = Math.hypot(dx, dy);
 
     if (e.type === 'orb') {
@@ -1448,7 +1518,7 @@ function updateEnemies(dt) {
           for (let b = 0; b < 3; b++) {
             setTimeout(() => {
               if (e.hp <= 0 || G.mode !== 'play') return;
-              const a2 = Math.atan2((player.y + 0.9) - (e.y + 0.5), player.x - e.x); // center y adjusted
+              const a2 = Math.atan2((player.y + 0.8) - (e.y + 0.5), player.x - e.x);
               fireFrom(eBullets, e.x, e.y + 0.5, Math.cos(a2) * 15, Math.sin(a2) * 15, 8, 2.6);
               AudioSys.enemyShot();
             }, b * 140);
@@ -1510,7 +1580,7 @@ function spawnPickup(x, y, kind) {
 function updatePickups(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i]; p.t += dt;
-    const dx = player.x - p.m.position.x, dy = (player.y + 0.9) - p.m.position.y; // center y adjusted to 1.8 height
+    const dx = player.x - p.m.position.x, dy = (player.y + 0.8) - p.m.position.y;
     const d = Math.hypot(dx, dy);
     if (d < 3.5) { p.vx += dx/d * 40 * dt; p.vy += dy/d * 40 * dt; }
     else { p.vy -= 18 * dt; }
@@ -1652,7 +1722,7 @@ function updateBoss(dt) {
       for (let i = 0; i < shots; i++) {
         setTimeout(() => {
           if (!boss.active || G.mode !== 'play') return;
-          const a = Math.atan2((player.y + 0.9) - boss.y, player.x - boss.x) + (Math.random()-0.5) * 0.12; // center y adjusted
+          const a = Math.atan2((player.y + 0.8) - boss.y, player.x - boss.x) + (Math.random()-0.5) * 0.12;
           fireFrom(eBullets, boss.x, boss.y, Math.cos(a) * 16, Math.sin(a) * 16, 14, 3.4);
           AudioSys.enemyShot();
         }, i * 170);
@@ -1666,7 +1736,7 @@ function updateBoss(dt) {
     }
   }
   /* contact damage */
-  if (Math.hypot(player.x - boss.x, (player.y + 0.9) - boss.y) < boss.r + 0.6) damagePlayer(20, boss.x); // center y adjusted
+  if (Math.hypot(player.x - boss.x, (player.y + 0.8) - boss.y) < boss.r + 0.6) damagePlayer(20, boss.x);
 }
 
 /* ============================================================
@@ -1903,6 +1973,7 @@ function frame() {
   fxPass.uniforms.uHit.value = G.hitFlash * 0.35;
   updateBackdrop(rawDt);
   updateGasClouds(rawDt);
+  updateLevelTheme(rawDt);
 
   if (G.mode === 'insertion') {
     updateInsertion(dt);
@@ -1918,8 +1989,7 @@ function frame() {
       updatePool(pPellets, dt, hitEnemies);
       updatePool(eBullets, dt, b => {
         if (!player.alive) return false;
-        // Collision bounding box mapped identically to the 1.8 height adjustment
-        if (Math.abs(b.m.position.x - player.x) < 0.45 && Math.abs(b.m.position.y - (player.y + 0.9)) < 1.05) {
+        if (Math.abs(b.m.position.x - player.x) < 0.5 && Math.abs(b.m.position.y - (player.y + 0.8)) < 1.0) {
           damagePlayer(b.dmg, b.m.position.x);
           return true;
         }
