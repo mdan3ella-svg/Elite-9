@@ -62,6 +62,7 @@ canvas{display:block}
 #telemetry .resRow{font-size:10px}
 #telemetry .resRow b{color:var(--amber-hi)}
 #telemetry .eyebrow{font-size:9px;text-align:right}
+
 #score{font-family:'Orbitron',sans-serif;font-weight:900;font-size:19px;color:var(--amber);letter-spacing:.08em}
 #bossWrap{bottom:64px;left:50%;transform:translateX(-50%);width:min(560px,80vw);padding:8px 14px 12px;display:none;text-align:center}
 #bossName{font-family:'Orbitron',sans-serif;font-weight:700;font-size:12px;letter-spacing:.4em;color:var(--red)}
@@ -85,6 +86,7 @@ canvas{display:block}
   text-shadow:0 0 14px rgba(255,122,26,.35),0 0 60px rgba(255,122,26,.25)}
 .bigTitle span{color:var(--amber)}
 .tagline{font-family:'Space Mono',monospace;font-size:clamp(10px,1.6vw,13px);letter-spacing:.34em;color:var(--ice);margin-top:14px;max-width:640px}
+
 .btn{pointer-events:auto;cursor:pointer;margin-top:14px;font-family:'Orbitron',sans-serif;font-weight:700;font-size:15px;letter-spacing:.3em;color:var(--void);background:linear-gradient(90deg,var(--amber),var(--amber-hi));border:none;padding:15px 52px;clip-path:polygon(14px 0,100% 0,100% calc(100% - 14px),calc(100% - 14px) 100%,0 100%,0 14px);transition:filter .15s,transform .1s}
 .btn:hover{filter:brightness(1.18)}
 .btn:active{transform:scale(.97)}
@@ -569,8 +571,13 @@ const texLoader = new THREE.TextureLoader();
 const bgTexCache = {};
 function getBgTexture(key) {
   if (bgTexCache[key]) return bgTexCache[key];
-  const t = texLoader.load(ASSETS.bg[key]);
-  t.colorSpace = THREE.SRGBColorSpace;
+  let t = null;
+  try {
+    t = texLoader.load(ASSETS.bg[key]);
+    t.colorSpace = THREE.SRGBColorSpace;
+  } catch (e) {
+    console.warn('Background texture failed to load', e);
+  }
   bgTexCache[key] = t;
   return t;
 }
@@ -882,9 +889,7 @@ function updateMuzzleFlashes(dt) {
 }
 
 /* ============================================================
-   DRIFTING GAS / NEBULA ATMOSPHERE — ambient volumetric-style
-   sprite clouds that drift through the play space (space telemetry
-   readouts on the HUD track their density — see updateHUD)
+   DRIFTING GAS / NEBULA ATMOSPHERE
    ============================================================ */
 const gasClouds = [];
 const GAS_COLORS = [0x2a6b74, 0x4a2a74, 0x6a4a1a, 0x1e4a5a];
@@ -981,7 +986,8 @@ const WEAPONS = [
   { name:'ION SHOTGUN',   glyph:'S', mode:'SCATTER // 7-CELL',rate:0.85,  heat:0.28,  color:COL.violet,flash:0.9 }
 ];
 const player = {
-  x: 2, y: 2, vx: 0, vy: 0, w: 0.62, h: 1.55,
+  // Hitbox parameters adjusted to perfectly match realistic visual height
+  x: 2, y: 2, vx: 0, vy: 0, w: 0.6, h: 1.8,
   facing: 1, grounded: false, jumps: 2,
   hull: 100, shield: 100, regenT: 0,
   weapon: 0, cooldown: 0, heat: 0, overheat: false,
@@ -1000,12 +1006,20 @@ function buildPlayer() {
   scene.add(g);
   player.group = g;
 
-  /* lightweight placeholder while the GLB streams in */
-  const placeholder = new THREE.Mesh(
+  /* lightweight placeholder while the GLB streams in (or fails) */
+  const placeholder = new THREE.Group();
+  const body = new THREE.Mesh(
     new THREE.CapsuleGeometry(0.32, 0.9, 4, 8),
     new THREE.MeshStandardMaterial({ color: 0x27303f, metalness:0.7, roughness:0.4, emissive: COL.cyan, emissiveIntensity:0.15 })
   );
-  placeholder.position.y = 0.95;
+  body.position.y = 0.95;
+  placeholder.add(body);
+  
+  const fallbackVisor = new THREE.Mesh(new THREE.SphereGeometry(0.12, 8, 8), new THREE.MeshBasicMaterial({ color: COL.cyan }));
+  fallbackVisor.position.set(0.2, 1.4, 0);
+  placeholder.add(fallbackVisor);
+  player.visor = fallbackVisor;
+
   g.add(placeholder);
   player.placeholder = placeholder;
 
@@ -1013,73 +1027,89 @@ function buildPlayer() {
   thrust.position.set(-0.1, 0.15, 0); g.add(thrust);
   player.thrust = thrust;
 
-  /* fallback gun-tip anchor (used before/if the bone attach fails) */
+  /* fallback gun-tip anchor */
   const anchor = new THREE.Object3D();
   anchor.position.set(0.5, 1.0, 0.16);
   g.add(anchor);
   player.gunAnchor = anchor;
+  
+  const fallbackGunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), new THREE.MeshBasicMaterial({ color: COL.cyan }));
+  fallbackGunTip.rotation.z = Math.PI / 2;
+  anchor.add(fallbackGunTip);
+  player.gunTip = fallbackGunTip;
 
-  new GLTFLoader().load(ASSETS.charModel, (gltf) => {
-    const root = gltf.scene;
-    root.traverse(o => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; if (o.material) { o.material.metalness = Math.min(1, (o.material.metalness ?? 0.5) + 0.15); o.material.roughness = Math.max(0.15, (o.material.roughness ?? 0.6) - 0.1); } } });
+  const fallbackMuzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
+  fallbackMuzzleLight.position.set(0.2, 0, 0);
+  anchor.add(fallbackMuzzleLight);
+  player.muzzleLight = fallbackMuzzleLight;
 
-    const box = new THREE.Box3().setFromObject(root);
-    const rawH = Math.max(0.001, box.max.y - box.min.y);
-    const scale = CHAR_HEIGHT / rawH;
+  try {
+    new GLTFLoader().load(ASSETS.charModel, (gltf) => {
+      const root = gltf.scene;
+      root.traverse(o => { if (o.isMesh) { o.castShadow = false; o.receiveShadow = false; if (o.material) { o.material.metalness = Math.min(1, (o.material.metalness ?? 0.5) + 0.15); o.material.roughness = Math.max(0.15, (o.material.roughness ?? 0.6) - 0.1); } } });
 
-    const model = new THREE.Group();
-    model.scale.setScalar(scale);
-    model.rotation.y = CHAR_BASE_YAW;
-    root.position.y -= box.min.y;
-    model.add(root);
-    g.add(model);
-    player.model = model;
-    g.remove(placeholder);
+      const box = new THREE.Box3().setFromObject(root);
+      const rawH = Math.max(0.001, box.max.y - box.min.y);
+      const scale = CHAR_HEIGHT / rawH;
 
-    /* animation mixer */
-    const mixer = new THREE.AnimationMixer(root);
-    player.mixer = mixer;
-    const find = n => THREE.AnimationClip.findByName(gltf.animations, n) || gltf.animations.find(c => c.name.toLowerCase().includes(n.toLowerCase()));
-    const clipIdle = find('idle');
-    const clipWalk = find('sneak walk');
-    const clipKickA = find('hurricane kick');
-    const clipKickB = find('inside cresent kick') || find('inside crescent kick');
-    if (clipIdle) player.actions.idle = mixer.clipAction(clipIdle);
-    if (clipWalk) player.actions.walk = mixer.clipAction(clipWalk);
-    if (clipKickA) player.actions.kickA = mixer.clipAction(clipKickA);
-    if (clipKickB) player.actions.kickB = mixer.clipAction(clipKickB);
-    if (player.actions.idle) { player.actions.idle.play(); player.activeAction = player.actions.idle; }
+      const model = new THREE.Group();
+      model.scale.setScalar(scale);
+      model.rotation.y = CHAR_BASE_YAW;
+      root.position.y -= box.min.y;
+      model.add(root);
+      g.add(model);
+      player.model = model;
+      g.remove(placeholder);
+      g.remove(anchor);
 
-    /* find hand + head bones to attach weapon glow / targeting eye */
-    let rightHand = null, head = null;
-    root.traverse(o => {
-      if (o.name === 'mixamorig:RightHand') rightHand = o;
-      if (o.name === 'mixamorig:Head') head = o;
+      /* animation mixer */
+      const mixer = new THREE.AnimationMixer(root);
+      player.mixer = mixer;
+      const find = n => THREE.AnimationClip.findByName(gltf.animations, n) || gltf.animations.find(c => c.name.toLowerCase().includes(n.toLowerCase()));
+      const clipIdle = find('idle');
+      const clipWalk = find('sneak walk');
+      const clipKickA = find('hurricane kick');
+      const clipKickB = find('inside cresent kick') || find('inside crescent kick');
+      if (clipIdle) player.actions.idle = mixer.clipAction(clipIdle);
+      if (clipWalk) player.actions.walk = mixer.clipAction(clipWalk);
+      if (clipKickA) player.actions.kickA = mixer.clipAction(clipKickA);
+      if (clipKickB) player.actions.kickB = mixer.clipAction(clipKickB);
+      if (player.actions.idle) { player.actions.idle.play(); player.activeAction = player.actions.idle; }
+
+      /* find hand + head bones to attach weapon glow / targeting eye */
+      let rightHand = null, head = null;
+      root.traverse(o => {
+        if (o.name === 'mixamorig:RightHand') rightHand = o;
+        if (o.name === 'mixamorig:Head') head = o;
+      });
+      const glowC = new THREE.MeshBasicMaterial({ color: COL.cyan });
+      if (rightHand) {
+        const gunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), glowC);
+        gunTip.rotation.z = Math.PI / 2;
+        gunTip.position.set(0.16, -0.02, 0.02);
+        rightHand.add(gunTip);
+        player.gunTip = gunTip;
+        const muzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
+        muzzleLight.position.set(0.3, -0.02, 0.02);
+        rightHand.add(muzzleLight);
+        player.muzzleLight = muzzleLight;
+      }
+      if (head) {
+        const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), glowC);
+        eye.position.set(0.09, 0.02, 0.11);
+        head.add(eye);
+        player.visor = eye;
+      }
+      player.ready = true;
+      setWeapon(player.weapon); // Ensure color updates on load
+    }, undefined, (err) => {
+      console.warn('ELITE-9: character model failed to load, using placeholder', err);
     });
-    const glowC = new THREE.MeshBasicMaterial({ color: COL.cyan });
-    if (rightHand) {
-      const gunTip = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.05, 0.34, 8), glowC);
-      gunTip.rotation.z = Math.PI / 2;
-      gunTip.position.set(0.16, -0.02, 0.02);
-      rightHand.add(gunTip);
-      player.gunTip = gunTip;
-      const muzzleLight = new THREE.PointLight(COL.cyan, 0, 4);
-      muzzleLight.position.set(0.3, -0.02, 0.02);
-      rightHand.add(muzzleLight);
-      player.muzzleLight = muzzleLight;
-    }
-    if (head) {
-      const eye = new THREE.Mesh(new THREE.SphereGeometry(0.045, 8, 8), glowC);
-      eye.position.set(0.09, 0.02, 0.11);
-      head.add(eye);
-      player.visor = eye;
-    }
+  } catch (err) {
+    console.warn('ELITE-9: Invalid URL for GLB (expected in sandboxed environment), using placeholder.', err);
     player.ready = true;
-  }, undefined, (err) => {
-    console.warn('ELITE-9: character model failed to load, using placeholder', err);
-  });
+  }
 }
-buildPlayer();
 
 function setWeapon(i) {
   player.weapon = i;
@@ -1136,7 +1166,7 @@ function tryFire(dt) {
   if (player.heat >= 1) { player.overheat = true; comms('WEAPON OVERHEAT — VENTING'); }
   const dir = player.facing;
   const upAim = Input.up && !player.grounded ? 0.35 : (Input.up ? 0.55 : 0);
-  const gx = player.x + dir * 0.9, gy = player.y + 1.0;
+  const gx = player.x + dir * 0.9, gy = player.y + 1.1; // gun y adjusted to 1.8 height
   AudioSys.shoot(player.weapon);
   Particles.spawn(gx, gy, 0, 4, w.color, 3, 0, 0.15);
   muzzleFlash(gx, gy, w.color, w.flash);
@@ -1177,7 +1207,7 @@ function damagePlayer(amount, fromX) {
 function killPlayer() {
   if (!player.alive) return;
   player.alive = false;
-  explode(player.x, player.y + 0.8, true, COL.cyan);
+  explode(player.x, player.y + 0.9, true, COL.cyan); // center y adjusted to 1.8 height
   player.group.visible = false;
   setTimeout(() => { G.mode = 'dead'; $('death').classList.add('on'); $('hud').classList.remove('on'); }, 900);
 }
@@ -1192,7 +1222,7 @@ function updatePlayer(dt) {
     player.dashT = 0.24; player.dashCD = 1.1; player.inv = Math.max(player.inv, 0.3);
     player.dashKick = Math.random() < 0.5 ? 'kickA' : 'kickB';
     AudioSys.dash();
-    shockwave(player.x, player.y + 0.8, COL.cyan, 2.5);
+    shockwave(player.x, player.y + 0.9, COL.cyan, 2.5); // center y adjusted to 1.8 height
   }
   let move = (Input.right ? 1 : 0) - (Input.left ? 1 : 0) + joyVec;
   move = Math.max(-1, Math.min(1, move));
@@ -1370,7 +1400,7 @@ function updateEnemies(dt) {
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
     e.t += dt;
-    const dx = player.x - e.x, dy = (player.y + 0.8) - e.y;
+    const dx = player.x - e.x, dy = (player.y + 0.9) - e.y; // center y adjusted to 1.8 height
     const dist = Math.hypot(dx, dy);
 
     if (e.type === 'orb') {
@@ -1418,7 +1448,7 @@ function updateEnemies(dt) {
           for (let b = 0; b < 3; b++) {
             setTimeout(() => {
               if (e.hp <= 0 || G.mode !== 'play') return;
-              const a2 = Math.atan2((player.y + 0.8) - (e.y + 0.5), player.x - e.x);
+              const a2 = Math.atan2((player.y + 0.9) - (e.y + 0.5), player.x - e.x); // center y adjusted
               fireFrom(eBullets, e.x, e.y + 0.5, Math.cos(a2) * 15, Math.sin(a2) * 15, 8, 2.6);
               AudioSys.enemyShot();
             }, b * 140);
@@ -1480,7 +1510,7 @@ function spawnPickup(x, y, kind) {
 function updatePickups(dt) {
   for (let i = pickups.length - 1; i >= 0; i--) {
     const p = pickups[i]; p.t += dt;
-    const dx = player.x - p.m.position.x, dy = (player.y + 0.8) - p.m.position.y;
+    const dx = player.x - p.m.position.x, dy = (player.y + 0.9) - p.m.position.y; // center y adjusted to 1.8 height
     const d = Math.hypot(dx, dy);
     if (d < 3.5) { p.vx += dx/d * 40 * dt; p.vy += dy/d * 40 * dt; }
     else { p.vy -= 18 * dt; }
@@ -1622,7 +1652,7 @@ function updateBoss(dt) {
       for (let i = 0; i < shots; i++) {
         setTimeout(() => {
           if (!boss.active || G.mode !== 'play') return;
-          const a = Math.atan2((player.y + 0.8) - boss.y, player.x - boss.x) + (Math.random()-0.5) * 0.12;
+          const a = Math.atan2((player.y + 0.9) - boss.y, player.x - boss.x) + (Math.random()-0.5) * 0.12; // center y adjusted
           fireFrom(eBullets, boss.x, boss.y, Math.cos(a) * 16, Math.sin(a) * 16, 14, 3.4);
           AudioSys.enemyShot();
         }, i * 170);
@@ -1636,7 +1666,7 @@ function updateBoss(dt) {
     }
   }
   /* contact damage */
-  if (Math.hypot(player.x - boss.x, (player.y + 0.8) - boss.y) < boss.r + 0.6) damagePlayer(20, boss.x);
+  if (Math.hypot(player.x - boss.x, (player.y + 0.9) - boss.y) < boss.r + 0.6) damagePlayer(20, boss.x); // center y adjusted
 }
 
 /* ============================================================
@@ -1888,7 +1918,8 @@ function frame() {
       updatePool(pPellets, dt, hitEnemies);
       updatePool(eBullets, dt, b => {
         if (!player.alive) return false;
-        if (Math.abs(b.m.position.x - player.x) < 0.5 && Math.abs(b.m.position.y - (player.y + 0.8)) < 1.0) {
+        // Collision bounding box mapped identically to the 1.8 height adjustment
+        if (Math.abs(b.m.position.x - player.x) < 0.45 && Math.abs(b.m.position.y - (player.y + 0.9)) < 1.05) {
           damagePlayer(b.dmg, b.m.position.x);
           return true;
         }
